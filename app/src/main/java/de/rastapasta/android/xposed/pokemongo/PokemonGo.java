@@ -2,17 +2,19 @@ package de.rastapasta.android.xposed.pokemongo;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XposedBridge;
+import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 import de.robv.android.xposed.XC_MethodHook;
-import static de.robv.android.xposed.XposedHelpers.findAndHookMethod;
 
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.security.cert.X509Certificate;
 import org.apache.commons.lang3.SerializationUtils;
 import android.util.Base64;
 
 public class PokemonGo implements IXposedHookLoadPackage {
-    // Contains the original certificate chain, serialized and Base64 encoded 
-    private static String originalChain =
+    // Contains the original certificate chain, serialized and Base64 encoded
+    private static final String ORIGINAL_CHAIN =
             "rO0ABXVyACVbTGphdmEuc2VjdXJpdHkuY2VydC5YNTA5Q2VydGlmaWNhdGU7V79uQD0B25oCAAB4"+
             "cAAAAAJzcgAtamF2YS5zZWN1cml0eS5jZXJ0LkNlcnRpZmljYXRlJENlcnRpZmljYXRlUmVwiSdq"+
             "ncmuPAwCAAJbAARkYXRhdAACW0JMAAR0eXBldAASTGphdmEvbGFuZy9TdHJpbmc7eHB1cgACW0Ks"+
@@ -64,28 +66,47 @@ public class PokemonGo implements IXposedHookLoadPackage {
             "4uYPL4ZLjXvDuacu9PGsFj45SVGeF0tPEDpbpaiSb/361gsDTUdWVxnzy2v189bPsPX1oxHSIFMT"+
             "NDcFLENaY9+NQNaFHlHpURceA1bJ8TCt55sRornQMYGbaLHZ6PPmlH7HrhMvh+3QJbBo+d4IWvMp"+
             "zNSScQB+AAg=";
+    private static final String TRUST_MANAGER = "com.nianticlabs.nia.network.NianticTrustManager";
 
     public void handleLoadPackage(final LoadPackageParam lpparam) throws Throwable {
         // Check if we got the Pokemon App
         if (!lpparam.packageName.equals("com.nianticlabs.pokemongo"))
             return;
 
-        // Prepare the hook parameters
-        X509Certificate[] cert = new X509Certificate[0];
+	// Locate NianticTrustManager class
+	final Class<?> ntmClass;
+	try {
+	    ntmClass = XposedHelpers.findClass(TRUST_MANAGER, lpparam.classLoader);
+	} catch (XposedHelpers.ClassNotFoundError e) {
+	    XposedBridge.log("Class " + TRUST_MANAGER + " not found");
+	    return;
+	}
 
-        // Hook it up! Intercept any calls to the checkServerTrusted
-        findAndHookMethod("com.nianticlabs.nia.network.NianticTrustManager", lpparam.classLoader, "checkServerTrusted", cert.getClass(), String.class, new XC_MethodHook() {
-            @Override
-            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                XposedBridge.log("Replacing Pokemon Go's chain of trust");
+	// Find the check{Client,Server}Trusted methods by signature
+	final Method[] ntmMethods = XposedHelpers.findMethodsByExactParameters(ntmClass, void.class, X509Certificate[].class, String.class);
+	if (ntmMethods == null || ntmMethods.length == 0) {
+	    XposedBridge.log("Method " + TRUST_MANAGER + "::check*Trusted() not found");
+	    return;
+	}
 
-                // Decode the stored original chain
-                byte[] buffer = Base64.decode(originalChain, Base64.DEFAULT);
+	for (Method m : ntmMethods) {
+	    // Toss out the nativeCheck*Trusted methods, which are private
+	    if (Modifier.isPrivate(m.getModifiers()))
+		continue;
 
-                // Restore the original chain object and inject it into the call arguments
-                param.args[0] = (X509Certificate[])SerializationUtils.deserialize(buffer);
-            }
-        });
+	    // Hook it up! Intercept any calls to check{Client,Server}Trusted
+	    XposedBridge.hookMethod(m, new XC_MethodHook() {
+		@Override
+		protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+		    XposedBridge.log("Replacing Pokemon Go's chain of trust");
+
+		    // Decode the stored original chain
+		    byte[] buffer = Base64.decode(ORIGINAL_CHAIN, Base64.DEFAULT);
+
+		    // Restore the original chain object and inject it into the call arguments
+		    param.args[0] = (X509Certificate[])SerializationUtils.deserialize(buffer);
+		}
+	    });
+	}
     }
-
 }
